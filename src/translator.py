@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from docx import Document
 import streamlit as st
 import logging
+import time
+from datetime import datetime, timedelta
 
 # 로깅 설정
 logging.basicConfig(
@@ -151,12 +153,32 @@ class DocumentTranslator:
     
     def translate_document(self, doc_path: str, target_lang: str) -> Document:
         """Word 문서를 번역합니다."""
+        start_time = time.time()
         logger.info(f"문서 번역 시작 - 파일: {doc_path}, 대상 언어: {target_lang}")
         doc = Document(doc_path)
         
-        # 진행 상태 표시를 위한 프로그레스 바
+        # 진행 상태 표시를 위한 프로그레스 바와 상태 텍스트
         progress_bar = st.progress(0)
         status_text = st.empty()
+        time_info = st.empty()
+        completion_info = st.empty()
+        
+        def update_time_info(progress: float, start_time: float, is_completed: bool = False):
+            """진행 시간과 예상 완료 시간을 업데이트합니다."""
+            elapsed_time = time.time() - start_time
+            if is_completed:
+                time_info.text(f"총 소요 시간: {timedelta(seconds=int(elapsed_time))}")
+                completion_info.success("번역이 완료되었습니다!")
+            elif progress > 0:
+                estimated_total_time = elapsed_time / progress
+                remaining_time = estimated_total_time - elapsed_time
+                estimated_completion = datetime.now() + timedelta(seconds=remaining_time)
+                
+                time_info.text(
+                    f"진행 시간: {timedelta(seconds=int(elapsed_time))} | "
+                    f"예상 남은 시간: {timedelta(seconds=int(remaining_time))} | "
+                    f"예상 완료 시간: {estimated_completion.strftime('%H:%M:%S')}"
+                )
         
         def is_translatable(text: str) -> bool:
             """번역이 필요한 텍스트인지 확인합니다."""
@@ -171,13 +193,29 @@ class DocumentTranslator:
             if not cells_data:
                 return []
                 
-            # 셀 텍스트를 하나의 문자열로 결합 (구분자로 구분)
-            combined_text = "\n---CELL_SEPARATOR---\n".join([text for _, text in cells_data])
             try:
+                # 셀 텍스트를 하나의 문자열로 결합 (구분자로 구분)
+                combined_text = "\n---CELL_SEPARATOR---\n".join([text for _, text in cells_data])
                 translated_text = self.translate_text(combined_text, target_lang)
+                
+                if not translated_text:
+                    logger.warning("번역된 텍스트가 비어있습니다.")
+                    return [""] * len(cells_data)
+                    
                 # 번역된 텍스트를 다시 개별 셀로 분리
                 translated_parts = translated_text.split("---CELL_SEPARATOR---")
-                return translated_parts
+                
+                # 원본 셀 수와 번역된 부분의 수가 일치하지 않을 경우 처리
+                if len(translated_parts) != len(cells_data):
+                    logger.warning(f"번역된 셀 수가 일치하지 않습니다. 원본: {len(cells_data)}, 번역: {len(translated_parts)}")
+                    # 부족한 부분은 빈 문자열로 채움
+                    if len(translated_parts) < len(cells_data):
+                        translated_parts.extend([""] * (len(cells_data) - len(translated_parts)))
+                    # 초과된 부분은 제거
+                    translated_parts = translated_parts[:len(cells_data)]
+                    
+                return [part.strip() for part in translated_parts]
+                
             except Exception as e:
                 logger.error(f"일괄 번역 중 오류 발생: {str(e)}")
                 return [""] * len(cells_data)
@@ -211,9 +249,10 @@ class DocumentTranslator:
                         current_batch[i][0].text = translated_text.strip()
                 
                 # 진행 상태 업데이트
-                progress = (table_idx + (batch_idx + 1) / total_batches) / len(doc.tables)
+                progress = (table_idx + (batch_idx + 1) / total_batches) / (len(doc.tables) + 1)  # +1은 단락 처리를 위한 여유
                 progress_bar.progress(progress)
                 status_text.text(f"표 {table_idx + 1}/{len(doc.tables)} 번역 중... ({batch_idx + 1}/{total_batches} 배치)")
+                update_time_info(progress, start_time)
         
         # 일반 단락 번역
         paragraphs_to_translate = [p for p in doc.paragraphs if p.text.strip() and is_translatable(p.text)]
@@ -225,12 +264,17 @@ class DocumentTranslator:
                     translated_text = self.translate_text(paragraph.text, target_lang)
                     if translated_text and translated_text != "번역 불가":
                         paragraph.text = translated_text
-                    progress = (i + 1) / total_paragraphs
+                    progress = (len(doc.tables) + (i + 1) / total_paragraphs) / (len(doc.tables) + 1)
                     progress_bar.progress(progress)
                     status_text.text(f"단락 번역 중... ({i + 1}/{total_paragraphs})")
+                    update_time_info(progress, start_time)
                 except Exception as e:
                     logger.error(f"단락 번역 중 오류 발생: {str(e)}")
                     continue
         
         logger.info("문서 번역 완료")
+        # 번역 완료 시 상태 업데이트
+        progress_bar.progress(1.0)
+        status_text.text("번역 완료")
+        update_time_info(1.0, start_time, is_completed=True)
         return doc 
